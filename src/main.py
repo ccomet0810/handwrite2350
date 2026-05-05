@@ -1,11 +1,168 @@
+import argparse
 import importlib
+import json
 import platform
+import re
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 
 OUTPUT_PATH = Path("/app/outputs/env_check.txt")
+MAPPING_OUTPUT_PATH = Path("/app/outputs/mapping_sample.txt")
+CHARSET_PATH = Path("charsets/basiclatin_ksx1001.txt")
+INPUT_DIR = Path("samples/input")
+WARPED_DIR = Path("outputs/warped")
+CELLS_DIR = Path("outputs/cells")
+SVG_DIR = Path("/app/outputs/svg")
+FONT_INFO_CONFIG_PATH = Path("config/font_info.json")
+FONT_INFO_PREVIEW_PATH = Path("outputs/font_info_preview.txt")
+PERFORMANCE_REPORT_PATH = Path("outputs/performance_report.txt")
+
+COLS = 11
+ROWS = 17
+CELLS_PER_PAGE = COLS * ROWS
+IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff"}
+DEFAULT_FAMILY_NAME = "Handwrite2350"
+DEFAULT_DESIGNER = ""
+
+
+def configure_output_encoding():
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    except AttributeError:
+        pass
+
+
+def list_images(path):
+    image_dir = Path(path)
+    if not image_dir.exists():
+        return []
+
+    return sorted(
+        item
+        for item in image_dir.iterdir()
+        if item.is_file() and item.suffix.lower() in IMAGE_EXTENSIONS
+    )
+
+
+def has_cell_images(path):
+    cells_dir = Path(path)
+    return cells_dir.exists() and any(
+        item.is_file() and item.suffix.lower() in {".png", ".jpg", ".jpeg"}
+        for item in cells_dir.rglob("*")
+    )
+
+
+def has_warped_png(path):
+    warped_dir = Path(path)
+    return warped_dir.exists() and any(warped_dir.glob("*.png"))
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(description="handwrite2350 font engine")
+    parser.add_argument("--family-name", dest="family_name")
+    parser.add_argument("--designer", dest="designer")
+    parser.add_argument("--interactive", action="store_true")
+    parser.add_argument("--workers", type=int)
+    parser.add_argument("--glyph-size", type=int, default=512)
+    parser.add_argument("--glyph-padding", type=int, default=48)
+    parser.add_argument(
+        "--font-quality",
+        choices=["fast", "high"],
+        default="fast",
+        help="FontForge glyph cleanup mode. fast is the default for service speed.",
+    )
+    parser.add_argument("--save-normalized", action="store_true")
+    parser.add_argument("--save-debug-artifacts", action="store_true")
+    parser.add_argument("--cell-margin", type=float, default=0.08)
+    return parser.parse_args()
+
+
+def load_font_info_config(path=FONT_INFO_CONFIG_PATH):
+    if not Path(path).exists():
+        return {}
+
+    with Path(path).open("r", encoding="utf-8") as file:
+        data = json.load(file)
+
+    if not isinstance(data, dict):
+        raise ValueError(f"font info config must be a JSON object: {path}")
+
+    return data
+
+
+def sanitize_postscript_name(value):
+    sanitized = re.sub(r"[^A-Za-z0-9-]", "", value)
+    return sanitized or "Handwrite2350-Regular"
+
+
+def build_font_info(family_name=DEFAULT_FAMILY_NAME, designer=DEFAULT_DESIGNER):
+    family_name = (family_name or DEFAULT_FAMILY_NAME).strip() or DEFAULT_FAMILY_NAME
+    designer = (designer or DEFAULT_DESIGNER).strip()
+    style_name = "Regular"
+
+    return {
+        "family_name": family_name,
+        "designer": designer,
+        "style_name": style_name,
+        "full_name": f"{family_name} {style_name}",
+        "postscript_name": sanitize_postscript_name(f"{family_name}-{style_name}"),
+        "version": "Version 1.000",
+        "manufacturer": "handwrite2350",
+        "description": (
+            "Handwritten font based on 94 Basic Latin and 2,350 KS X 1001 "
+            "Hangul glyphs."
+        ),
+        "copyright": (
+            f"Copyright \u00A9 {designer}. All rights reserved." if designer else ""
+        ),
+        "license": "",
+    }
+
+
+def prompt_font_info(default_family_name, default_designer):
+    family_prompt = f"Font family name [{default_family_name}]: "
+    designer_prompt = "Designer name [optional]: "
+
+    family_name = input(family_prompt).strip() or default_family_name
+    designer = input(designer_prompt).strip() or default_designer
+    return family_name, designer
+
+
+def resolve_font_info(args):
+    family_name = DEFAULT_FAMILY_NAME
+    designer = DEFAULT_DESIGNER
+
+    if args.family_name is not None or args.designer is not None:
+        family_name = args.family_name if args.family_name is not None else family_name
+        designer = args.designer if args.designer is not None else designer
+    elif not args.interactive:
+        config = load_font_info_config(FONT_INFO_CONFIG_PATH)
+        family_name = config.get("family_name", family_name)
+        designer = config.get("designer", designer)
+
+    if args.interactive:
+        family_name, designer = prompt_font_info(family_name, designer)
+
+    return build_font_info(family_name, designer)
+
+
+def format_font_info(font_info):
+    lines = ["handwrite2350 font info preview", "=" * 40]
+    for key, value in font_info.items():
+        lines.append(f"{key}: {value}")
+    return "\n".join(lines) + "\n"
+
+
+def run_font_info_preview(args):
+    font_info = resolve_font_info(args)
+    output_text = format_font_info(font_info)
+    FONT_INFO_PREVIEW_PATH.parent.mkdir(parents=True, exist_ok=True)
+    FONT_INFO_PREVIEW_PATH.write_text(output_text, encoding="utf-8")
+    print(output_text, end="")
+    return font_info
 
 
 def check_import(module_name, display_name):
@@ -37,7 +194,44 @@ def check_command(command, display_name):
         return False, f"[FAIL] {display_name}: {type(exc).__name__}: {exc}"
 
 
-def main():
+def load_charset(path):
+    try:
+        return Path(path).read_text(encoding="utf-8").replace("\r", "").replace("\n", "")
+    except FileNotFoundError as exc:
+        raise FileNotFoundError(f"charset file not found: {path}") from exc
+
+
+def index_to_position(index):
+    page = index // CELLS_PER_PAGE
+    row = (index % CELLS_PER_PAGE) // COLS
+    col = (index % CELLS_PER_PAGE) % COLS
+    return page, row, col
+
+
+def index_to_glyph_info(chars, index):
+    try:
+        char = chars[index]
+    except IndexError as exc:
+        raise IndexError(
+            f"index out of range: {index} (charset length: {len(chars)})"
+        ) from exc
+
+    unicode_dec = ord(char)
+    unicode_hex = f"U+{unicode_dec:04X}"
+    page, row, col = index_to_position(index)
+
+    return {
+        "index": index,
+        "char": char,
+        "unicode_dec": unicode_dec,
+        "unicode_hex": unicode_hex,
+        "page": page,
+        "row": row,
+        "col": col,
+    }
+
+
+def run_env_check():
     checks = []
     checks.append((True, f"[OK] Python: {platform.python_version()} ({sys.executable})"))
     checks.append(check_import("cv2", "OpenCV (cv2)"))
@@ -66,7 +260,208 @@ def main():
     OUTPUT_PATH.write_text(output_text, encoding="utf-8")
     print(output_text, end="")
 
-    if failed:
+    return not failed
+
+
+def format_glyph_info(info):
+    return (
+        f"index={info['index']} "
+        f"char={info['char']} "
+        f"unicode_dec={info['unicode_dec']} "
+        f"unicode_hex={info['unicode_hex']} "
+        f"page={info['page']} "
+        f"row={info['row']} "
+        f"col={info['col']}"
+    )
+
+
+def run_mapping_sample():
+    chars = load_charset(CHARSET_PATH)
+    sample_indexes = [0, 93, 94, 187, len(chars) - 1]
+
+    lines = [
+        "handwrite2350 charset mapping sample",
+        "=" * 40,
+        f"Charset path: {CHARSET_PATH}",
+        f"Total characters: {len(chars)}",
+        "",
+    ]
+
+    for index in sample_indexes:
+        info = index_to_glyph_info(chars, index)
+        lines.append(format_glyph_info(info))
+
+    MAPPING_OUTPUT_PATH.parent.mkdir(parents=True, exist_ok=True)
+    output_text = "\n".join(lines) + "\n"
+    MAPPING_OUTPUT_PATH.write_text(output_text, encoding="utf-8")
+    print(output_text, end="")
+
+
+def timed_step(performance, name, callback):
+    start = time.perf_counter()
+    result = callback()
+    performance[name] = time.perf_counter() - start
+    return result
+
+
+def write_performance_report(performance):
+    total = performance.get("total time", 0.0)
+    lines = ["handwrite2350 performance report", "=" * 40]
+    for name in [
+        "preprocessing time",
+        "cell split time",
+        "trace time",
+        "font build time",
+        "total time",
+    ]:
+        lines.append(f"{name}: {performance.get(name, 0.0):.2f}s")
+
+    lines.extend(
+        [
+            f"cell PNG saving: {performance.get('cell PNG saving', False)}",
+            f"direct trace mode: {performance.get('direct trace mode', False)}",
+            f"page binary mode: {performance.get('page binary mode', False)}",
+            f"in-memory warped input: {performance.get('in-memory warped input', False)}",
+            f"font quality: {performance.get('font quality', 'fast')}",
+            f"debug artifacts saved: {performance.get('debug artifacts saved', False)}",
+        ]
+    )
+
+    if total > 0:
+        measured = sum(
+            performance.get(name, 0.0)
+            for name in [
+                "preprocessing time",
+                "cell split time",
+                "trace time",
+                "font build time",
+            ]
+        )
+        lines.append(f"other time: {max(0.0, total - measured):.2f}s")
+
+    PERFORMANCE_REPORT_PATH.parent.mkdir(parents=True, exist_ok=True)
+    output_text = "\n".join(lines) + "\n"
+    PERFORMANCE_REPORT_PATH.write_text(output_text, encoding="utf-8")
+    print(output_text, end="")
+
+
+def main():
+    total_start = time.perf_counter()
+    performance = {}
+    configure_output_encoding()
+    args = parse_args()
+    env_ok = run_env_check()
+
+    try:
+        font_info = run_font_info_preview(args)
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        print(f"[ERROR] failed to load font info: {exc}")
+        sys.exit(1)
+
+    try:
+        run_mapping_sample()
+    except (FileNotFoundError, IndexError) as exc:
+        message = f"[ERROR] {exc}"
+        MAPPING_OUTPUT_PATH.parent.mkdir(parents=True, exist_ok=True)
+        MAPPING_OUTPUT_PATH.write_text(message + "\n", encoding="utf-8")
+        print(message)
+        sys.exit(1)
+
+    if list_images(INPUT_DIR):
+        from page_preprocess import run_preprocess
+
+        preprocess_ok, warped_records = timed_step(
+            performance,
+            "preprocessing time",
+            lambda: run_preprocess(INPUT_DIR, save_debug=args.save_debug_artifacts),
+        )
+        if not preprocess_ok:
+            sys.exit(1)
+    else:
+        print("No input images found in samples/input. Skipped preprocessing.\n")
+        performance["preprocessing time"] = 0.0
+        warped_records = []
+
+    cell_records = []
+    performance["cell PNG saving"] = args.save_debug_artifacts
+    performance["debug artifacts saved"] = args.save_debug_artifacts
+    performance["page binary mode"] = False
+    performance["font quality"] = args.font_quality
+    performance["in-memory warped input"] = bool(warped_records)
+
+    if warped_records or has_warped_png(WARPED_DIR):
+        from cell_split import run_cell_split
+
+        cell_split_ok, cell_records = timed_step(
+            performance,
+            "cell split time",
+            lambda: run_cell_split(
+                WARPED_DIR,
+                CHARSET_PATH,
+                margin_ratio=args.cell_margin,
+                save_cells=args.save_debug_artifacts,
+                save_contact_sheets=args.save_debug_artifacts,
+                warped_records=warped_records if warped_records else None,
+            ),
+        )
+        if not cell_split_ok:
+            sys.exit(1)
+        warped_records = []
+    else:
+        print("No warped images found in outputs/warped. Skipped cell split.\n")
+        performance["cell split time"] = 0.0
+
+    performance["direct trace mode"] = bool(cell_records)
+
+    if cell_records or has_cell_images(CELLS_DIR):
+        from trace_glyphs import run_trace
+
+        trace_ok = timed_step(
+            performance,
+            "trace time",
+            lambda: run_trace(
+                CELLS_DIR,
+                CHARSET_PATH,
+                cell_records=cell_records if cell_records else None,
+                workers=args.workers,
+                glyph_size=args.glyph_size,
+                glyph_padding=args.glyph_padding,
+                save_normalized=args.save_normalized,
+            ),
+        )
+        if not trace_ok:
+            sys.exit(1)
+        cell_records = []
+    else:
+        print("No cell images found in outputs/cells. Skipped SVG tracing.\n")
+        performance["trace time"] = 0.0
+
+    from build_font import count_svg_files, run_font_build
+
+    svg_count = count_svg_files(SVG_DIR)
+    print(f"SVG files found in {SVG_DIR}: {svg_count}\n", end="")
+
+    if svg_count > 0:
+        font_build_ok = timed_step(
+            performance,
+            "font build time",
+            lambda: run_font_build(
+                font_info,
+                CHARSET_PATH,
+                SVG_DIR,
+                font_quality=args.font_quality,
+            ),
+        )
+        if not font_build_ok:
+            sys.exit(1)
+    else:
+        print(f"No SVG files found in {SVG_DIR}. Skipped TTF generation.\n")
+        performance["font build time"] = 0.0
+
+    performance["total time"] = time.perf_counter() - total_start
+    write_performance_report(performance)
+
+    if not env_ok:
         sys.exit(1)
 
 
