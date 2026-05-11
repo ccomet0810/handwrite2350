@@ -98,7 +98,7 @@ docker run --rm -v "$(pwd)/samples:/app/samples" -v "$(pwd)/outputs:/app/outputs
 - `--family-name`: 폰트 family name 지정
 - `--designer`: designer 이름 지정
 - `--interactive`: 터미널에서 metadata 입력
-- `--workers`: Potrace 병렬 처리 worker 수 지정
+- `--workers`: page preprocess와 Potrace 병렬 처리 worker 수 지정
 - `--glyph-size`: glyph 정규화 canvas 크기, 기본 `512`
 - `--glyph-padding`: glyph 정규화 padding, 기본 `48`
 - `--font-quality`: FontForge cleanup 모드, `fast` 또는 `high`, 기본 `fast`

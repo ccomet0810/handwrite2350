@@ -1,5 +1,6 @@
 from concurrent.futures import ProcessPoolExecutor, as_completed
 import argparse
+import csv
 import os
 from pathlib import Path
 import subprocess
@@ -8,17 +9,102 @@ import time
 import cv2
 import numpy as np
 
+from glyph_classify import classify_glyph
+
 
 CELLS_DIR = Path("outputs/cells")
 SVG_DIR = Path("/app/outputs/svg")
 TMP_DIR = Path("/app/outputs/tmp")
 NORMALIZED_DIR = Path("/app/outputs/normalized")
 REPORT_PATH = Path("/app/outputs/trace_report.txt")
+GLYPH_METRICS_REPORT_PATH = Path("/app/outputs/glyph_metrics_report.csv")
 CHARSET_PATH = Path("charsets/basiclatin_ksx1001.txt")
 
 DEFAULT_GLYPH_SIZE = 512
 DEFAULT_GLYPH_PADDING = 48
 CELL_EXTENSIONS = {".png"}
+
+
+PUNCTUATION_LAYOUTS = {
+    "!": ("punct_exclam", 120, 330, 256, 255),
+    '"': ("punct_double_quote", 74, 110, 256, 135),
+    "#": ("punct_hash", 192, 270, 256, 265),
+    "$": ("punct_dollar", 168, 330, 256, 260),
+    "%": ("punct_percent", 200, 280, 256, 265),
+    "&": ("punct_ampersand", 200, 280, 256, 265),
+    "'": ("punct_quote", 52, 112, 256, 135),
+    "(": ("punct_paren_left", 112, 340, 256, 270),
+    ")": ("punct_paren_right", 112, 340, 256, 270),
+    "*": ("punct_asterisk", 140, 140, 256, 215),
+    "+": ("punct_plus", 168, 168, 256, 278),
+    ",": ("punct_comma", 58, 112, 256, 382),
+    "-": ("punct_hyphen", 168, 44, 256, 278),
+    ".": ("punct_dot", 52, 56, 256, 376),
+    "/": ("punct_slash", 126, 330, 256, 270),
+    ":": ("punct_colon", 94, 255, 256, 280),
+    ";": ("punct_semicolon", 94, 278, 256, 300),
+    "<": ("punct_less", 170, 245, 256, 270),
+    "=": ("punct_equal", 170, 126, 256, 282),
+    ">": ("punct_greater", 170, 245, 256, 270),
+    "?": ("punct_question", 142, 330, 256, 260),
+    "@": ("punct_at", 220, 245, 256, 272),
+    "[": ("punct_bracket_left", 105, 345, 256, 270),
+    "\\": ("punct_backslash", 126, 330, 256, 270),
+    "]": ("punct_bracket_right", 105, 345, 256, 270),
+    "^": ("punct_caret", 126, 104, 256, 180),
+    "_": ("punct_underscore", 180, 44, 256, 398),
+    "`": ("punct_backtick", 62, 104, 256, 140),
+    "{": ("punct_brace_left", 112, 345, 256, 270),
+    "|": ("punct_bar", 58, 335, 256, 270),
+    "}": ("punct_brace_right", 112, 345, 256, 270),
+    "~": ("punct_tilde", 176, 88, 256, 260),
+}
+
+
+PUNCTUATION_SIZE_BOOST = 1.12
+
+
+def boosted_punctuation_layout(layout):
+    name, target_width, target_height, target_center_x, target_center_y = layout
+    return (
+        name,
+        int(round(target_width * PUNCTUATION_SIZE_BOOST)),
+        int(round(target_height * PUNCTUATION_SIZE_BOOST)),
+        target_center_x,
+        target_center_y,
+    )
+
+
+def layout_profile(char, group):
+    if char in PUNCTUATION_LAYOUTS:
+        return boosted_punctuation_layout(PUNCTUATION_LAYOUTS[char])
+    if group == "hangul_syllable":
+        return "hangul", 326, 356, 256, 258
+    if group == "basic_latin_upper":
+        if char in "MW":
+            return "latin_upper_wide", 292, 350, 256, 260
+        if char == "I":
+            return "latin_upper_i", 376, 360, 256, 260
+        return "latin_upper", 258, 350, 256, 260
+    if group == "basic_latin_digit":
+        if char == "1":
+            return "latin_digit_one", 215, 344, 256, 265
+        return "latin_digit", 248, 332, 256, 265
+    if group == "basic_latin_lower":
+        if char in "bdfhkl":
+            if char in "il":
+                return "latin_narrow", 112, 340, 256, 270
+            return "latin_ascender", 234, 348, 256, 270
+        if char in "gjpqy":
+            return "latin_descender", 238, 348, 256, 315
+        if char in "it":
+            return "latin_narrow", 112, 340, 256, 270
+        if char in "mw":
+            return "latin_lower_wide", 286, 282, 256, 310
+        return "latin_lower", 236, 282, 256, 310
+    if group in {"punctuation", "symbol"}:
+        return "symbol", 155, 210, 256, 265
+    return "default", 230, 300, 256, 270
 
 
 def parse_args():
@@ -73,11 +159,6 @@ def list_svg_files(svg_dir=SVG_DIR):
     return sorted(path.rglob("*.svg"))
 
 
-def is_basic_latin_punctuation(char):
-    codepoint = ord(char)
-    return 0x0021 <= codepoint <= 0x007E and not char.isalnum()
-
-
 def decode_cell_image(task):
     if "gray_bytes" in task:
         height, width = task["gray_shape"]
@@ -128,21 +209,78 @@ def threshold_final(gray):
     return binary
 
 
-def normalize_cell_bitmap(image, char, glyph_size, glyph_padding, source):
+def measure_glyph_bitmap(image, char, source):
     gray, binary_for_bbox = threshold_for_bbox(image)
 
     ys, xs = np.where(binary_for_bbox == 0)
     if len(xs) == 0 or len(ys) == 0:
         raise ValueError(f"empty glyph bitmap after threshold: {source}")
 
-    if is_basic_latin_punctuation(char):
-        crop = gray
-    else:
-        x0, x1 = xs.min(), xs.max() + 1
-        y0, y1 = ys.min(), ys.max() + 1
-        crop = gray[y0:y1, x0:x1]
+    x0, x1 = int(xs.min()), int(xs.max()) + 1
+    y0, y1 = int(ys.min()), int(ys.max()) + 1
+    bbox_width = x1 - x0
+    bbox_height = y1 - y0
+    center_x = x0 + bbox_width / 2.0
+    center_y = y0 + bbox_height / 2.0
+    group = classify_glyph(char)
 
-    crop_height, crop_width = crop.shape
+    return {
+        "group": group,
+        "bbox_x0": x0,
+        "bbox_y0": y0,
+        "bbox_x1": x1,
+        "bbox_y1": y1,
+        "bbox_width": bbox_width,
+        "bbox_height": bbox_height,
+        "bbox_max": max(bbox_width, bbox_height),
+        "center_x": center_x,
+        "center_y": center_y,
+        "source_width": int(gray.shape[1]),
+        "source_height": int(gray.shape[0]),
+    }
+
+
+def clamp(value, lower, upper):
+    return max(lower, min(upper, value))
+
+
+def glyph_crop_with_padding(gray, metrics):
+    x0 = metrics["bbox_x0"]
+    x1 = metrics["bbox_x1"]
+    y0 = metrics["bbox_y0"]
+    y1 = metrics["bbox_y1"]
+    pad = max(3, int(round(max(metrics["bbox_width"], metrics["bbox_height"]) * 0.06)))
+    x0 = max(0, x0 - pad)
+    y0 = max(0, y0 - pad)
+    x1 = min(gray.shape[1], x1 + pad)
+    y1 = min(gray.shape[0], y1 + pad)
+    return gray[y0:y1, x0:x1], x0, y0
+
+
+def calculate_layout_scale(
+    metrics,
+    target_width,
+    target_height,
+    target_size,
+    glyph_size,
+    crop_width,
+    crop_height,
+):
+    width = max(1, metrics["bbox_width"])
+    height = max(1, metrics["bbox_height"])
+    scale = min(target_width / width, target_height / height)
+    return min(
+        scale,
+        target_size / width,
+        target_size / height,
+        glyph_size / crop_width,
+        glyph_size / crop_height,
+    )
+
+
+def normalize_cell_bitmap(image, char, glyph_size, glyph_padding, source, metrics=None):
+    gray, _ = threshold_for_bbox(image)
+    metrics = metrics or measure_glyph_bitmap(gray, char, source)
 
     target_size = glyph_size - glyph_padding * 2
     if target_size <= 0:
@@ -150,9 +288,31 @@ def normalize_cell_bitmap(image, char, glyph_size, glyph_padding, source):
             f"glyph padding is too large for glyph size: size={glyph_size}, padding={glyph_padding}"
         )
 
-    scale = min(target_size / crop_width, target_size / crop_height)
-    if is_basic_latin_punctuation(char):
-        scale = min(scale, 1.0)
+    layout, target_width, target_height, target_center_x, target_center_y = layout_profile(
+        char,
+        metrics["group"],
+    )
+    crop, crop_x0, crop_y0 = glyph_crop_with_padding(gray, metrics)
+    crop_height, crop_width = crop.shape
+    scale = calculate_layout_scale(
+        metrics,
+        target_width,
+        target_height,
+        target_size,
+        glyph_size,
+        crop_width,
+        crop_height,
+    )
+    bbox_center_in_crop_x = metrics["center_x"] - crop_x0
+    bbox_center_in_crop_y = metrics["center_y"] - crop_y0
+
+    metrics["scale"] = float(scale)
+    metrics["scale_adjustment"] = float(scale)
+    metrics["target_width"] = target_width
+    metrics["target_height"] = target_height
+    metrics["target_center_x"] = target_center_x
+    metrics["target_center_y"] = target_center_y
+    metrics["layout"] = layout
 
     new_width = max(1, int(round(crop_width * scale)))
     new_height = max(1, int(round(crop_height * scale)))
@@ -162,8 +322,22 @@ def normalize_cell_bitmap(image, char, glyph_size, glyph_padding, source):
     resized = threshold_final(resized)
 
     canvas = np.full((glyph_size, glyph_size), 255, dtype=np.uint8)
-    x_offset = (glyph_size - new_width) // 2
-    y_offset = (glyph_size - new_height) // 2
+    x_offset = int(round(target_center_x - bbox_center_in_crop_x * scale))
+    y_offset = int(round(target_center_y - bbox_center_in_crop_y * scale))
+    x_offset = int(clamp(x_offset, 0, glyph_size - new_width))
+    y_offset = int(clamp(y_offset, 0, glyph_size - new_height))
+    actual_center_x = x_offset + bbox_center_in_crop_x * scale
+    actual_center_y = y_offset + bbox_center_in_crop_y * scale
+    dx = int(round(actual_center_x - metrics["center_x"]))
+    dy = int(round(actual_center_y - metrics["center_y"]))
+    metrics["dx"] = dx
+    metrics["dy"] = dy
+    metrics["correction_applied"] = True
+    metrics["scale_adjusted"] = True
+    metrics["position_adjusted"] = (
+        abs(actual_center_x - metrics["center_x"]) > 1
+        or abs(actual_center_y - metrics["center_y"]) > 1
+    )
     canvas[y_offset : y_offset + new_height, x_offset : x_offset + new_width] = resized
 
     return canvas
@@ -191,6 +365,7 @@ def trace_glyph_task(task):
             task["glyph_size"],
             task["glyph_padding"],
             source,
+            task.get("metrics"),
         )
         if task["save_normalized"]:
             normalized_path = Path(task["normalized_dir"]) / f"uni{codepoint:04X}.png"
@@ -205,7 +380,24 @@ def trace_glyph_task(task):
             text=False,
         )
         svg_path.write_bytes(result.stdout)
-        return {"ok": True, "index": index, "svg_path": str(svg_path)}
+        metrics = task.get("metrics", {})
+        return {
+            "ok": True,
+            "index": index,
+            "svg_path": str(svg_path),
+            "scale": metrics.get("scale", ""),
+            "scale_adjustment": metrics.get("scale_adjustment", ""),
+            "dx": metrics.get("dx", ""),
+            "dy": metrics.get("dy", ""),
+            "target_width": metrics.get("target_width", ""),
+            "target_height": metrics.get("target_height", ""),
+            "target_center_x": metrics.get("target_center_x", ""),
+            "target_center_y": metrics.get("target_center_y", ""),
+            "layout": metrics.get("layout", ""),
+            "correction_applied": metrics.get("correction_applied", ""),
+            "scale_adjusted": metrics.get("scale_adjusted", ""),
+            "position_adjusted": metrics.get("position_adjusted", ""),
+        }
     except Exception as exc:
         return {
             "ok": False,
@@ -222,9 +414,10 @@ def cleanup_empty_tmp_dir():
         TMP_DIR.rmdir()
 
 
-def clear_output_dirs(save_normalized):
-    SVG_DIR.mkdir(parents=True, exist_ok=True)
-    for old_svg in list_svg_files(SVG_DIR):
+def clear_output_dirs(save_normalized, svg_dir=SVG_DIR):
+    svg_dir = Path(svg_dir)
+    svg_dir.mkdir(parents=True, exist_ok=True)
+    for old_svg in list_svg_files(svg_dir):
         old_svg.unlink()
     if TMP_DIR.exists():
         for old_pbm in TMP_DIR.glob("*.pbm"):
@@ -236,6 +429,175 @@ def clear_output_dirs(save_normalized):
             old_png.unlink()
 
 
+def median(values):
+    sorted_values = sorted(values)
+    count = len(sorted_values)
+    if count == 0:
+        return 0.0
+    middle = count // 2
+    if count % 2:
+        return float(sorted_values[middle])
+    return (sorted_values[middle - 1] + sorted_values[middle]) / 2.0
+
+
+def calculate_group_medians(metrics_rows):
+    grouped = {}
+    for row in metrics_rows:
+        if not row.get("ok"):
+            continue
+        grouped.setdefault(row["group"], []).append(row)
+
+    return {
+        group: {
+            "bbox_width": median([row["bbox_width"] for row in rows]),
+            "bbox_height": median([row["bbox_height"] for row in rows]),
+            "bbox_max": median([row["bbox_max"] for row in rows]),
+            "center_x": median([row["center_x"] for row in rows]),
+            "center_y": median([row["center_y"] for row in rows]),
+        }
+        for group, rows in grouped.items()
+    }
+
+
+def measure_trace_metrics(tasks):
+    metrics_rows = []
+    metrics_by_index = {}
+
+    for task in tasks:
+        index = task["index"]
+        char = task["char"]
+        row = {
+            "index": index,
+            "char": char,
+            "unicode": f"U+{ord(char):04X}",
+            "group": classify_glyph(char),
+            "ok": False,
+            "error": "",
+        }
+        try:
+            image, source = decode_cell_image(task)
+            row.update(measure_glyph_bitmap(image, char, source))
+            row["ok"] = True
+            metrics_by_index[index] = {
+                key: row[key]
+                for key in [
+                    "group",
+                    "bbox_x0",
+                    "bbox_y0",
+                    "bbox_x1",
+                    "bbox_y1",
+                    "bbox_width",
+                    "bbox_height",
+                    "bbox_max",
+                    "center_x",
+                    "center_y",
+                    "source_width",
+                    "source_height",
+                ]
+            }
+        except Exception as exc:
+            row["error"] = f"{type(exc).__name__}: {exc}"
+        metrics_rows.append(row)
+
+    group_medians = calculate_group_medians(metrics_rows)
+
+    for row in metrics_rows:
+        medians = group_medians.get(row["group"], {})
+        row["group_median_bbox_width"] = medians.get("bbox_width", "")
+        row["group_median_bbox_height"] = medians.get("bbox_height", "")
+        row["group_median_bbox_max"] = medians.get("bbox_max", "")
+        row["group_median_center_x"] = medians.get("center_x", "")
+        row["group_median_center_y"] = medians.get("center_y", "")
+        row["scale"] = ""
+        row["scale_adjustment"] = ""
+        row["dx"] = ""
+        row["dy"] = ""
+        row["target_width"] = ""
+        row["target_height"] = ""
+        row["target_center_x"] = ""
+        row["target_center_y"] = ""
+        row["layout"] = ""
+        row["correction_applied"] = ""
+        row["scale_adjusted"] = ""
+        row["position_adjusted"] = ""
+
+    for metrics in metrics_by_index.values():
+        medians = group_medians.get(metrics["group"], {})
+        metrics["group_median_bbox_width"] = medians.get("bbox_width", metrics["bbox_width"])
+        metrics["group_median_bbox_height"] = medians.get("bbox_height", metrics["bbox_height"])
+        metrics["group_median_bbox_max"] = medians.get("bbox_max", metrics["bbox_max"])
+        metrics["group_median_center_x"] = medians.get("center_x", metrics["center_x"])
+        metrics["group_median_center_y"] = medians.get("center_y", metrics["center_y"])
+
+    return metrics_rows, metrics_by_index
+
+
+def update_metrics_report_rows(metrics_rows, task_results):
+    by_index = {row["index"]: row for row in metrics_rows}
+    for result in task_results:
+        row = by_index.get(result["index"])
+        if row is None:
+            continue
+        if result.get("ok"):
+            row["scale"] = result.get("scale", "")
+            row["scale_adjustment"] = result.get("scale_adjustment", "")
+            row["dx"] = result.get("dx", "")
+            row["dy"] = result.get("dy", "")
+            row["target_width"] = result.get("target_width", "")
+            row["target_height"] = result.get("target_height", "")
+            row["target_center_x"] = result.get("target_center_x", "")
+            row["target_center_y"] = result.get("target_center_y", "")
+            row["layout"] = result.get("layout", "")
+            row["correction_applied"] = result.get("correction_applied", "")
+            row["scale_adjusted"] = result.get("scale_adjusted", "")
+            row["position_adjusted"] = result.get("position_adjusted", "")
+
+
+def write_glyph_metrics_report(rows, path=GLYPH_METRICS_REPORT_PATH):
+    report_path = Path(path)
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    fieldnames = [
+        "index",
+        "char",
+        "unicode",
+        "group",
+        "ok",
+        "bbox_x0",
+        "bbox_y0",
+        "bbox_x1",
+        "bbox_y1",
+        "bbox_width",
+        "bbox_height",
+        "bbox_max",
+        "center_x",
+        "center_y",
+        "source_width",
+        "source_height",
+        "group_median_bbox_width",
+        "group_median_bbox_height",
+        "group_median_bbox_max",
+        "group_median_center_x",
+        "group_median_center_y",
+        "correction_applied",
+        "scale_adjusted",
+        "position_adjusted",
+        "scale",
+        "scale_adjustment",
+        "dx",
+        "dy",
+        "target_width",
+        "target_height",
+        "target_center_x",
+        "target_center_y",
+        "layout",
+        "error",
+    ]
+    with report_path.open("w", encoding="utf-8", newline="") as file:
+        writer = csv.DictWriter(file, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows({key: row.get(key, "") for key in fieldnames} for row in rows)
+
+
 def run_trace(
     cells_dir=CELLS_DIR,
     charset_path=CHARSET_PATH,
@@ -244,6 +606,7 @@ def run_trace(
     glyph_size=DEFAULT_GLYPH_SIZE,
     glyph_padding=DEFAULT_GLYPH_PADDING,
     save_normalized=False,
+    svg_dir=SVG_DIR,
 ):
     start = time.perf_counter()
     REPORT_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -275,10 +638,12 @@ def run_trace(
     if input_count == 0:
         report = "No cell input found. Skipped SVG tracing.\n"
         REPORT_PATH.write_text(report, encoding="utf-8")
+        write_glyph_metrics_report([])
         print(report, end="")
         return True
 
-    clear_output_dirs(save_normalized)
+    svg_dir = Path(svg_dir)
+    clear_output_dirs(save_normalized, svg_dir)
 
     tasks = []
     for order_index in range(target_count):
@@ -286,7 +651,7 @@ def run_trace(
         task = {
             "index": glyph_index,
             "char": chars[glyph_index],
-            "svg_dir": str(SVG_DIR),
+            "svg_dir": str(svg_dir),
             "normalized_dir": str(NORMALIZED_DIR),
             "glyph_size": glyph_size,
             "glyph_padding": glyph_padding,
@@ -319,10 +684,18 @@ def run_trace(
             task["cell_path"] = str(cell_paths[order_index])
         tasks.append(task)
 
+    metrics_rows, metrics_by_index = measure_trace_metrics(tasks)
+    for task in tasks:
+        metrics = metrics_by_index.get(task["index"])
+        if metrics is not None:
+            task["metrics"] = metrics
+
+    task_results = []
     with ProcessPoolExecutor(max_workers=worker_count) as executor:
         futures = [executor.submit(trace_glyph_task, task) for task in tasks]
         for future in as_completed(futures):
             result = future.result()
+            task_results.append(result)
             if result["ok"]:
                 success_count += 1
             else:
@@ -335,6 +708,16 @@ def run_trace(
     if input_count < len(chars):
         for index in range(input_count, len(chars)):
             char = chars[index]
+            metrics_rows.append(
+                {
+                    "index": index,
+                    "char": char,
+                    "unicode": f"U+{ord(char):04X}",
+                    "group": classify_glyph(char),
+                    "ok": False,
+                    "error": "missing cell input",
+                }
+            )
             failures.append(
                 f"index={index} file=<missing> char={char} "
                 f"unicode=U+{ord(char):04X} error=missing cell input"
@@ -342,6 +725,18 @@ def run_trace(
 
     if input_count > len(chars):
         failures.append(f"extra cell inputs ignored: {input_count - len(chars)}")
+
+    update_metrics_report_rows(metrics_rows, task_results)
+    write_glyph_metrics_report(metrics_rows)
+    adjusted_count = sum(
+        1 for result in task_results if result.get("ok") and result.get("correction_applied")
+    )
+    scale_adjusted_count = sum(
+        1 for result in task_results if result.get("ok") and result.get("scale_adjusted")
+    )
+    position_adjusted_count = sum(
+        1 for result in task_results if result.get("ok") and result.get("position_adjusted")
+    )
 
     cleanup_empty_tmp_dir()
     elapsed = time.perf_counter() - start
@@ -360,12 +755,15 @@ def run_trace(
         f"input mode: {input_mode}",
         f"success count: {success_count}",
         f"failed count: {len(failures)}",
+        f"adjusted glyph count: {adjusted_count}",
+        f"scale adjusted count: {scale_adjusted_count}",
+        f"position adjusted count: {position_adjusted_count}",
         f"worker count: {worker_count}",
         f"glyph size: {glyph_size}",
         f"glyph padding: {glyph_padding}",
         f"save_normalized: {save_normalized}",
         f"normalized PNG count: {normalized_count}",
-        f"SVG files in {SVG_DIR}: {len(list_svg_files(SVG_DIR))}",
+        f"SVG files in {svg_dir}: {len(list_svg_files(svg_dir))}",
         f"elapsed time: {elapsed:.2f}s",
         "",
         "failed glyph list:",
@@ -389,6 +787,7 @@ if __name__ == "__main__":
             glyph_size=args.glyph_size,
             glyph_padding=args.glyph_padding,
             save_normalized=args.save_normalized,
+            svg_dir=SVG_DIR,
         )
         else 1
     )

@@ -1,10 +1,13 @@
 import argparse
+from concurrent.futures import ThreadPoolExecutor
 import importlib
 import json
 import platform
 import re
+import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -76,6 +79,8 @@ def parse_args():
     )
     parser.add_argument("--save-normalized", action="store_true")
     parser.add_argument("--save-debug-artifacts", action="store_true")
+    parser.add_argument("--export-svg-artifacts", action="store_true")
+    parser.add_argument("--check-env", action="store_true")
     parser.add_argument("--cell-margin", type=float, default=0.08)
     return parser.parse_args()
 
@@ -232,13 +237,16 @@ def index_to_glyph_info(chars, index):
 
 
 def run_env_check():
-    checks = []
-    checks.append((True, f"[OK] Python: {platform.python_version()} ({sys.executable})"))
-    checks.append(check_import("cv2", "OpenCV (cv2)"))
-    checks.append(check_import("numpy", "NumPy"))
-    checks.append(check_import("PIL", "Pillow (PIL)"))
-    checks.append(check_command(["fontforge", "--version"], "FontForge"))
-    checks.append(check_command(["potrace", "--version"], "Potrace"))
+    check_tasks = [
+        lambda: (True, f"[OK] Python: {platform.python_version()} ({sys.executable})"),
+        lambda: check_import("cv2", "OpenCV (cv2)"),
+        lambda: check_import("numpy", "NumPy"),
+        lambda: check_import("PIL", "Pillow (PIL)"),
+        lambda: check_command(["fontforge", "--version"], "FontForge"),
+        lambda: check_command(["potrace", "--version"], "Potrace"),
+    ]
+    with ThreadPoolExecutor(max_workers=len(check_tasks)) as executor:
+        checks = list(executor.map(lambda task: task(), check_tasks))
 
     lines = [
         "handwrite2350 Docker environment check",
@@ -304,6 +312,18 @@ def timed_step(performance, name, callback):
     return result
 
 
+def add_detail_time(performance, name, elapsed):
+    details = performance.setdefault("detail times", {})
+    details[name] = details.get(name, 0.0) + elapsed
+
+
+def timed_detail(performance, name, callback):
+    start = time.perf_counter()
+    result = callback()
+    add_detail_time(performance, name, time.perf_counter() - start)
+    return result
+
+
 def write_performance_report(performance):
     total = performance.get("total time", 0.0)
     lines = ["handwrite2350 performance report", "=" * 40]
@@ -324,11 +344,13 @@ def write_performance_report(performance):
             f"in-memory warped input: {performance.get('in-memory warped input', False)}",
             f"font quality: {performance.get('font quality', 'fast')}",
             f"debug artifacts saved: {performance.get('debug artifacts saved', False)}",
+            f"env check run: {performance.get('env check run', False)}",
+            f"SVG artifact export: {performance.get('SVG artifact export', False)}",
         ]
     )
 
     if total > 0:
-        measured = sum(
+        stage_measured = sum(
             performance.get(name, 0.0)
             for name in [
                 "preprocessing time",
@@ -337,29 +359,74 @@ def write_performance_report(performance):
                 "font build time",
             ]
         )
-        lines.append(f"other time: {max(0.0, total - measured):.2f}s")
+        other_time = max(0.0, total - stage_measured)
+        lines.append(f"other time: {other_time:.2f}s")
+
+        detail_times = performance.get("detail times", {})
+        if detail_times:
+            lines.extend(["", "other time breakdown:"])
+            for name, elapsed in sorted(
+                detail_times.items(),
+                key=lambda item: item[1],
+                reverse=True,
+            ):
+                lines.append(f"{name}: {elapsed:.4f}s")
+            detail_total = sum(detail_times.values())
+            lines.append(f"other detail total: {detail_total:.4f}s")
+            lines.append(f"other unaccounted: {max(0.0, other_time - detail_total):.4f}s")
 
     PERFORMANCE_REPORT_PATH.parent.mkdir(parents=True, exist_ok=True)
     output_text = "\n".join(lines) + "\n"
+    start = time.perf_counter()
     PERFORMANCE_REPORT_PATH.write_text(output_text, encoding="utf-8")
+    add_detail_time(performance, "performance report write time", time.perf_counter() - start)
+    start = time.perf_counter()
     print(output_text, end="")
+    add_detail_time(performance, "performance report stdout time", time.perf_counter() - start)
+
+
+def export_svg_artifacts(source_dir, output_dir=SVG_DIR):
+    source_dir = Path(source_dir)
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    for old_svg in output_dir.glob("*.svg"):
+        old_svg.unlink()
+
+    copied_count = 0
+    for svg_path in source_dir.glob("*.svg"):
+        shutil.copyfile(svg_path, output_dir / svg_path.name)
+        copied_count += 1
+    return copied_count
 
 
 def main():
     total_start = time.perf_counter()
     performance = {}
-    configure_output_encoding()
-    args = parse_args()
-    env_ok = run_env_check()
+    timed_detail(performance, "stdout encoding setup time", configure_output_encoding)
+    args = timed_detail(performance, "argument parse time", parse_args)
+    performance["env check run"] = args.check_env
+    if args.check_env:
+        env_ok = timed_detail(performance, "environment check/write/stdout time", run_env_check)
+    else:
+        env_ok = True
 
     try:
-        font_info = run_font_info_preview(args)
+        font_info = timed_detail(
+            performance,
+            "font info resolve/write/stdout time",
+            lambda: run_font_info_preview(args),
+        )
     except (OSError, ValueError, json.JSONDecodeError) as exc:
         print(f"[ERROR] failed to load font info: {exc}")
         sys.exit(1)
 
     try:
-        run_mapping_sample()
+        timed_detail(
+            performance,
+            "mapping sample load/write/stdout time",
+            run_mapping_sample,
+        )
     except (FileNotFoundError, IndexError) as exc:
         message = f"[ERROR] {exc}"
         MAPPING_OUTPUT_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -367,13 +434,26 @@ def main():
         print(message)
         sys.exit(1)
 
-    if list_images(INPUT_DIR):
-        from page_preprocess import run_preprocess
+    input_images = timed_detail(
+        performance,
+        "input image count/list time",
+        lambda: list_images(INPUT_DIR),
+    )
+    if input_images:
+        run_preprocess = timed_detail(
+            performance,
+            "page_preprocess import time",
+            lambda: __import__("page_preprocess").run_preprocess,
+        )
 
         preprocess_ok, warped_records = timed_step(
             performance,
             "preprocessing time",
-            lambda: run_preprocess(INPUT_DIR, save_debug=args.save_debug_artifacts),
+            lambda: run_preprocess(
+                INPUT_DIR,
+                save_debug=args.save_debug_artifacts,
+                workers=args.workers,
+            ),
         )
         if not preprocess_ok:
             sys.exit(1)
@@ -389,8 +469,20 @@ def main():
     performance["font quality"] = args.font_quality
     performance["in-memory warped input"] = bool(warped_records)
 
-    if warped_records or has_warped_png(WARPED_DIR):
-        from cell_split import run_cell_split
+    warped_png_exists = False
+    if not warped_records:
+        warped_png_exists = timed_detail(
+            performance,
+            "warped PNG existence check time",
+            lambda: has_warped_png(WARPED_DIR),
+        )
+
+    if warped_records or warped_png_exists:
+        run_cell_split = timed_detail(
+            performance,
+            "cell_split import time",
+            lambda: __import__("cell_split").run_cell_split,
+        )
 
         cell_split_ok, cell_records = timed_step(
             performance,
@@ -413,8 +505,26 @@ def main():
 
     performance["direct trace mode"] = bool(cell_records)
 
-    if cell_records or has_cell_images(CELLS_DIR):
-        from trace_glyphs import run_trace
+    cell_images_exist = False
+    if not cell_records:
+        cell_images_exist = timed_detail(
+            performance,
+            "cell image existence check time",
+            lambda: has_cell_images(CELLS_DIR),
+        )
+
+    work_temp = tempfile.TemporaryDirectory(prefix="handwrite2350-work-")
+    work_dir = Path(work_temp.name)
+    local_svg_dir = work_dir / "svg"
+    performance["local SVG work dir"] = str(local_svg_dir)
+    performance["SVG artifact export"] = args.export_svg_artifacts
+
+    if cell_records or cell_images_exist:
+        run_trace = timed_detail(
+            performance,
+            "trace_glyphs import time",
+            lambda: __import__("trace_glyphs").run_trace,
+        )
 
         trace_ok = timed_step(
             performance,
@@ -427,6 +537,7 @@ def main():
                 glyph_size=args.glyph_size,
                 glyph_padding=args.glyph_padding,
                 save_normalized=args.save_normalized,
+                svg_dir=local_svg_dir,
             ),
         )
         if not trace_ok:
@@ -436,10 +547,32 @@ def main():
         print("No cell images found in outputs/cells. Skipped SVG tracing.\n")
         performance["trace time"] = 0.0
 
-    from build_font import count_svg_files, run_font_build
+    build_font_module = timed_detail(
+        performance,
+        "build_font import time",
+        lambda: __import__("build_font"),
+    )
+    count_svg_files = build_font_module.count_svg_files
+    run_font_build = build_font_module.run_font_build
 
-    svg_count = count_svg_files(SVG_DIR)
-    print(f"SVG files found in {SVG_DIR}: {svg_count}\n", end="")
+    svg_count = timed_detail(
+        performance,
+        "main SVG files found count time",
+        lambda: count_svg_files(local_svg_dir),
+    )
+    timed_detail(
+        performance,
+        "main SVG files found stdout time",
+        lambda: print(f"SVG files found in {local_svg_dir}: {svg_count}\n", end=""),
+    )
+
+    if args.export_svg_artifacts and svg_count > 0:
+        exported_count = timed_detail(
+            performance,
+            "SVG artifact export time",
+            lambda: export_svg_artifacts(local_svg_dir, SVG_DIR),
+        )
+        performance["SVG artifacts exported count"] = exported_count
 
     if svg_count > 0:
         font_build_ok = timed_step(
@@ -448,7 +581,7 @@ def main():
             lambda: run_font_build(
                 font_info,
                 CHARSET_PATH,
-                SVG_DIR,
+                local_svg_dir,
                 font_quality=args.font_quality,
             ),
         )
@@ -460,6 +593,7 @@ def main():
 
     performance["total time"] = time.perf_counter() - total_start
     write_performance_report(performance)
+    timed_detail(performance, "local work dir cleanup time", work_temp.cleanup)
 
     if not env_ok:
         sys.exit(1)

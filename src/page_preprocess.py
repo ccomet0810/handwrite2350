@@ -1,3 +1,4 @@
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 import cv2
@@ -62,9 +63,7 @@ def find_marker_candidates(image):
     height, width = image.shape[:2]
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
     blurred = cv2.GaussianBlur(gray, (5, 5), 0)
-    _, binary = cv2.threshold(
-        blurred, 0, 255, cv2.THRESH_BINARY_INV | cv2.THRESH_OTSU
-    )
+    _, binary = cv2.threshold(blurred, 140, 255, cv2.THRESH_BINARY_INV)
 
     kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
     binary = cv2.morphologyEx(binary, cv2.MORPH_OPEN, kernel)
@@ -233,7 +232,17 @@ def preprocess_image(image_path, save_debug=False):
     )
 
 
-def run_preprocess(input_dir=INPUT_DIR, save_debug=False):
+def preprocess_image_task(index_and_path, save_debug=False):
+    index, image_path = index_and_path
+    try:
+        line, warped_record = preprocess_image(image_path, save_debug=save_debug)
+        return index, True, line, warped_record
+    except Exception as exc:
+        line = f"FAIL {image_path.name}: {type(exc).__name__}: {exc}"
+        return index, False, line, None
+
+
+def run_preprocess(input_dir=INPUT_DIR, save_debug=False, workers=None):
     image_paths = list_input_images(input_dir)
     REPORT_PATH.parent.mkdir(parents=True, exist_ok=True)
 
@@ -243,18 +252,39 @@ def run_preprocess(input_dir=INPUT_DIR, save_debug=False):
         print(report, end="")
         return True, []
 
-    lines = ["handwrite2350 page preprocess report", "=" * 40]
+    worker_count = max(1, int(workers)) if workers else 1
+    worker_count = min(worker_count, len(image_paths))
+    lines = [
+        "handwrite2350 page preprocess report",
+        "=" * 40,
+        f"worker count: {worker_count}",
+    ]
     success = True
     warped_records = []
+    results = [None] * len(image_paths)
 
-    for image_path in image_paths:
-        try:
-            line, warped_record = preprocess_image(image_path, save_debug=save_debug)
-            lines.append(line)
+    if worker_count == 1:
+        for item in enumerate(image_paths):
+            index, ok, line, warped_record = preprocess_image_task(
+                item,
+                save_debug=save_debug,
+            )
+            results[index] = (ok, line, warped_record)
+    else:
+        with ThreadPoolExecutor(max_workers=worker_count) as executor:
+            futures = [
+                executor.submit(preprocess_image_task, item, save_debug)
+                for item in enumerate(image_paths)
+            ]
+            for future in as_completed(futures):
+                index, ok, line, warped_record = future.result()
+                results[index] = (ok, line, warped_record)
+
+    for ok, line, warped_record in results:
+        success = success and ok
+        lines.append(line)
+        if warped_record is not None:
             warped_records.append(warped_record)
-        except Exception as exc:
-            success = False
-            lines.append(f"FAIL {image_path.name}: {type(exc).__name__}: {exc}")
 
     report = "\n".join(lines) + "\n"
     REPORT_PATH.write_text(report, encoding="utf-8")
