@@ -119,3 +119,66 @@ SVG 변환 결과는 `outputs/trace_report.txt`에서 확인합니다. 여기에
 TTF 생성 결과는 `outputs/font_build_report.txt`에서 확인합니다. 여기에는 charset 수, import된 SVG 수, 누락 SVG 수, 생성된 TTF 경로, font quality, create font time, import SVG total time, glyph cleanup time, metadata time, generate TTF time, 실패 glyph 목록이 기록됩니다.
 
 전체 실행 성능은 `outputs/performance_report.txt`에서 확인합니다. 여기에는 preprocessing, cell split, trace, font build, total time, cell PNG saving, direct trace mode, page binary mode, in-memory warped input이 기록됩니다.
+
+## Fast Mode
+
+`--fast` keeps the same font-generation pipeline, but skips review/debug work that is not required to build the TTF.
+
+Fast mode changes:
+
+- skips writing `outputs/warped/*.png`; warped pages are still passed in memory
+- uses `--warp-interpolation linear` unless `--warp-interpolation cubic` is explicitly set
+- skips the detailed glyph metrics CSV
+- skips font info preview and charset mapping sample output
+- keeps fatal checks for input images, marker detection, charset/cell mismatch, Potrace, SVG output, FontForge, and TTF generation
+
+Windows PowerShell:
+
+```powershell
+docker run --rm `
+  -v "${PWD}/samples:/app/samples" `
+  -v "${PWD}/outputs:/app/outputs" `
+  -v "${PWD}/charsets:/app/charsets" `
+  -v "${PWD}/config:/app/config" `
+  handwrite2350 --fast --workers 8 --family-name "test-fast" --designer "ccomet"
+```
+
+`outputs/performance_report.txt` records `fast mode`, `save warped PNG`, `warp interpolation`, `trace metrics`, preprocessing time, trace time, font build time, and total time so normal and fast runs can be compared.
+
+## Adaptive Glyph Layout
+
+The default layout mode is `fixed`, which keeps the existing `trace_glyphs.py` layout behavior for compatibility.
+
+`--layout-mode adaptive` enables the experimental adaptive glyph layout system. It measures each glyph ink bbox, classifies glyphs into Latin, Hangul, digit, punctuation, and symbol groups, computes group median statistics, then applies the zone/anchor/scale policy rules from `config/glyph_layout.json`.
+
+`config/glyph_layout.json` is not a per-character coordinate table. It is a tunable rule table for:
+
+- zones and anchors, such as Latin cap/x-height/ascender/descender, Hangul ideographic face, top/bottom/middle punctuation
+- group scale policies
+- reference groups
+- conservative outlier correction limits
+- small overrides that map exceptional characters to groups
+
+Basic fast run:
+
+```powershell
+docker run --rm `
+  -v "${PWD}/samples:/app/samples" `
+  -v "${PWD}/outputs:/app/outputs" `
+  -v "${PWD}/charsets:/app/charsets" `
+  -v "${PWD}/config:/app/config" `
+  handwrite2350 --fast --workers 8 --family-name "test-fast" --designer "ccomet"
+```
+
+Adaptive layout experiment:
+
+```powershell
+docker run --rm `
+  -v "${PWD}/samples:/app/samples" `
+  -v "${PWD}/outputs:/app/outputs" `
+  -v "${PWD}/charsets:/app/charsets" `
+  -v "${PWD}/config:/app/config" `
+  handwrite2350 --fast --workers 8 --layout-mode adaptive --report-glyph-layout --family-name "test-adaptive" --designer "ccomet"
+```
+
+When `--report-glyph-layout` is set, adaptive layout writes `outputs/glyph_layout_report.csv` and `outputs/glyph_layout_summary.txt`. Use these reports to inspect group assignment, zone selection, median dimensions, outliers, and corrections before tuning the JSON numbers by hand.

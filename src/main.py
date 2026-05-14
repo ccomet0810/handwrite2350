@@ -19,6 +19,7 @@ INPUT_DIR = Path("samples/input")
 WARPED_DIR = Path("outputs/warped")
 CELLS_DIR = Path("outputs/cells")
 SVG_DIR = Path("/app/outputs/svg")
+GLYPH_LAYOUT_CONFIG_PATH = Path("config/glyph_layout.json")
 FONT_INFO_CONFIG_PATH = Path("config/font_info.json")
 FONT_INFO_PREVIEW_PATH = Path("outputs/font_info_preview.txt")
 PERFORMANCE_REPORT_PATH = Path("outputs/performance_report.txt")
@@ -65,6 +66,7 @@ def has_warped_png(path):
 
 def parse_args():
     parser = argparse.ArgumentParser(description="handwrite2350 font engine")
+    parser.add_argument("--fast", action="store_true")
     parser.add_argument("--family-name", dest="family_name")
     parser.add_argument("--designer", dest="designer")
     parser.add_argument("--interactive", action="store_true")
@@ -82,7 +84,19 @@ def parse_args():
     parser.add_argument("--export-svg-artifacts", action="store_true")
     parser.add_argument("--check-env", action="store_true")
     parser.add_argument("--cell-margin", type=float, default=0.08)
+    parser.add_argument("--warp-interpolation", choices=["cubic", "linear"])
+    parser.add_argument("--layout-mode", choices=["fixed", "adaptive"], default="fixed")
+    parser.add_argument("--glyph-layout-config", default=str(GLYPH_LAYOUT_CONFIG_PATH))
+    parser.add_argument("--report-glyph-layout", action="store_true")
     return parser.parse_args()
+
+
+def resolve_warp_interpolation(args):
+    if args.warp_interpolation:
+        return args.warp_interpolation
+    if args.fast:
+        return "linear"
+    return "cubic"
 
 
 def load_font_info_config(path=FONT_INFO_CONFIG_PATH):
@@ -324,9 +338,30 @@ def timed_detail(performance, name, callback):
     return result
 
 
-def write_performance_report(performance):
+def write_performance_report(performance, detailed=True):
     total = performance.get("total time", 0.0)
     lines = ["handwrite2350 performance report", "=" * 40]
+    lines.extend(
+        [
+            f"fast mode: {performance.get('fast mode', False)}",
+            f"save warped PNG: {performance.get('save warped PNG', True)}",
+            f"warp interpolation: {performance.get('warp interpolation', 'cubic')}",
+            f"trace metrics: {performance.get('trace metrics', 'full')}",
+            f"layout mode: {performance.get('layout mode', 'fixed')}",
+            f"glyph layout report: {performance.get('glyph layout report', False)}",
+        ]
+    )
+    if performance.get("fast mode", False):
+        lines.extend(
+            [
+                "fast mode skipped work:",
+                "- warped PNG file writes",
+                "- font info preview file/stdout",
+                "- charset mapping sample file/stdout",
+                "- detailed glyph metrics CSV",
+                "- detailed performance breakdown",
+            ]
+        )
     for name in [
         "preprocessing time",
         "cell split time",
@@ -349,7 +384,7 @@ def write_performance_report(performance):
         ]
     )
 
-    if total > 0:
+    if detailed and total > 0:
         stage_measured = sum(
             performance.get(name, 0.0)
             for name in [
@@ -405,6 +440,15 @@ def main():
     performance = {}
     timed_detail(performance, "stdout encoding setup time", configure_output_encoding)
     args = timed_detail(performance, "argument parse time", parse_args)
+    save_warped = not args.fast
+    warp_interpolation = resolve_warp_interpolation(args)
+    trace_metrics_mode = "none" if args.fast else "full"
+    performance["fast mode"] = args.fast
+    performance["save warped PNG"] = save_warped
+    performance["warp interpolation"] = warp_interpolation
+    performance["trace metrics"] = trace_metrics_mode
+    performance["layout mode"] = args.layout_mode
+    performance["glyph layout report"] = args.report_glyph_layout
     performance["env check run"] = args.check_env
     if args.check_env:
         env_ok = timed_detail(performance, "environment check/write/stdout time", run_env_check)
@@ -412,21 +456,35 @@ def main():
         env_ok = True
 
     try:
-        font_info = timed_detail(
-            performance,
-            "font info resolve/write/stdout time",
-            lambda: run_font_info_preview(args),
-        )
+        if args.fast:
+            font_info = timed_detail(
+                performance,
+                "font info resolve time",
+                lambda: resolve_font_info(args),
+            )
+        else:
+            font_info = timed_detail(
+                performance,
+                "font info resolve/write/stdout time",
+                lambda: run_font_info_preview(args),
+            )
     except (OSError, ValueError, json.JSONDecodeError) as exc:
         print(f"[ERROR] failed to load font info: {exc}")
         sys.exit(1)
 
     try:
-        timed_detail(
-            performance,
-            "mapping sample load/write/stdout time",
-            run_mapping_sample,
-        )
+        if args.fast:
+            timed_detail(
+                performance,
+                "charset validation time",
+                lambda: load_charset(CHARSET_PATH),
+            )
+        else:
+            timed_detail(
+                performance,
+                "mapping sample load/write/stdout time",
+                run_mapping_sample,
+            )
     except (FileNotFoundError, IndexError) as exc:
         message = f"[ERROR] {exc}"
         MAPPING_OUTPUT_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -453,6 +511,8 @@ def main():
                 INPUT_DIR,
                 save_debug=args.save_debug_artifacts,
                 workers=args.workers,
+                save_warped=save_warped,
+                interpolation=warp_interpolation,
             ),
         )
         if not preprocess_ok:
@@ -538,6 +598,10 @@ def main():
                 glyph_padding=args.glyph_padding,
                 save_normalized=args.save_normalized,
                 svg_dir=local_svg_dir,
+                metrics_mode=trace_metrics_mode,
+                layout_mode=args.layout_mode,
+                glyph_layout_config_path=args.glyph_layout_config,
+                report_glyph_layout=args.report_glyph_layout,
             ),
         )
         if not trace_ok:
@@ -592,7 +656,7 @@ def main():
         performance["font build time"] = 0.0
 
     performance["total time"] = time.perf_counter() - total_start
-    write_performance_report(performance)
+    write_performance_report(performance, detailed=not args.fast)
     timed_detail(performance, "local work dir cleanup time", work_temp.cleanup)
 
     if not env_ok:

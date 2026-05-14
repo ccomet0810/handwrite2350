@@ -10,6 +10,15 @@ import cv2
 import numpy as np
 
 from glyph_classify import classify_glyph
+from glyph_layout import (
+    DEFAULT_CONFIG_PATH as DEFAULT_GLYPH_LAYOUT_CONFIG_PATH,
+    apply_adaptive_layout,
+    compute_group_statistics,
+    get_group_for_char,
+    load_glyph_layout_config,
+    resolve_layout_rule,
+    write_glyph_layout_report,
+)
 
 
 CELLS_DIR = Path("outputs/cells")
@@ -78,19 +87,41 @@ def boosted_punctuation_layout(layout):
 def layout_profile(char, group):
     if char in PUNCTUATION_LAYOUTS:
         return boosted_punctuation_layout(PUNCTUATION_LAYOUTS[char])
-    if group == "hangul_syllable":
+    if group == "hangul_syllable" or group.startswith("hangul_"):
         return "hangul", 326, 356, 256, 258
+    if group in {"latin_upper", "latin_upper_q"}:
+        return "latin_upper", 258, 350, 256, 260
+    if group == "latin_upper_wide":
+        return "latin_upper_wide", 292, 350, 256, 260
+    if group == "latin_upper_narrow":
+        return "latin_upper_i", 376, 360, 256, 260
     if group == "basic_latin_upper":
         if char in "MW":
             return "latin_upper_wide", 292, 350, 256, 260
         if char == "I":
             return "latin_upper_i", 376, 360, 256, 260
         return "latin_upper", 258, 350, 256, 260
+    if group == "digit":
+        return "latin_digit", 248, 332, 256, 265
+    if group == "digit_one":
+        return "latin_digit_one", 215, 344, 256, 265
     if group == "basic_latin_digit":
         if char == "1":
             return "latin_digit_one", 215, 344, 256, 265
         return "latin_digit", 248, 332, 256, 265
-    if group == "basic_latin_lower":
+    if group == "latin_lower_ascender":
+        return "latin_ascender", 234, 348, 256, 270
+    if group == "latin_lower_descender":
+        return "latin_descender", 238, 348, 256, 315
+    if group == "latin_lower_narrow":
+        return "latin_narrow", 112, 340, 256, 270
+    if group == "latin_lower_t":
+        return "latin_narrow", 112, 340, 256, 270
+    if group == "latin_lower_j":
+        return "latin_descender", 238, 348, 256, 315
+    if group == "latin_lower_wide":
+        return "latin_lower_wide", 286, 282, 256, 310
+    if group in {"basic_latin_lower", "latin_lower_xheight"}:
         if char in "bdfhkl":
             if char in "il":
                 return "latin_narrow", 112, 340, 256, 270
@@ -115,6 +146,10 @@ def parse_args():
     parser.add_argument("--glyph-size", type=int, default=DEFAULT_GLYPH_SIZE)
     parser.add_argument("--glyph-padding", type=int, default=DEFAULT_GLYPH_PADDING)
     parser.add_argument("--save-normalized", action="store_true")
+    parser.add_argument("--metrics-mode", choices=["full", "none"], default="full")
+    parser.add_argument("--layout-mode", choices=["fixed", "adaptive"], default="fixed")
+    parser.add_argument("--glyph-layout-config", default=str(DEFAULT_GLYPH_LAYOUT_CONFIG_PATH))
+    parser.add_argument("--report-glyph-layout", action="store_true")
     return parser.parse_args()
 
 
@@ -288,10 +323,26 @@ def normalize_cell_bitmap(image, char, glyph_size, glyph_padding, source, metric
             f"glyph padding is too large for glyph size: size={glyph_size}, padding={glyph_padding}"
         )
 
-    layout, target_width, target_height, target_center_x, target_center_y = layout_profile(
-        char,
-        metrics["group"],
-    )
+    if all(
+        key in metrics
+        for key in [
+            "layout",
+            "target_width",
+            "target_height",
+            "target_center_x",
+            "target_center_y",
+        ]
+    ):
+        layout = metrics["layout"]
+        target_width = metrics["target_width"]
+        target_height = metrics["target_height"]
+        target_center_x = metrics["target_center_x"]
+        target_center_y = metrics["target_center_y"]
+    else:
+        layout, target_width, target_height, target_center_x, target_center_y = layout_profile(
+            char,
+            metrics["group"],
+        )
     crop, crop_x0, crop_y0 = glyph_crop_with_padding(gray, metrics)
     crop_height, crop_width = crop.shape
     scale = calculate_layout_scale(
@@ -459,7 +510,7 @@ def calculate_group_medians(metrics_rows):
     }
 
 
-def measure_trace_metrics(tasks):
+def measure_trace_metrics(tasks, layout_config=None):
     metrics_rows = []
     metrics_by_index = {}
 
@@ -470,7 +521,10 @@ def measure_trace_metrics(tasks):
             "index": index,
             "char": char,
             "unicode": f"U+{ord(char):04X}",
-            "group": classify_glyph(char),
+            "group": get_group_for_char(char, layout_config) if layout_config else classify_glyph(char),
+            "page": task.get("page", ""),
+            "row": task.get("row", ""),
+            "col": task.get("col", ""),
             "ok": False,
             "error": "",
         }
@@ -530,6 +584,79 @@ def measure_trace_metrics(tasks):
         metrics["group_median_center_y"] = medians.get("center_y", metrics["center_y"])
 
     return metrics_rows, metrics_by_index
+
+
+def measure_required_bbox_metrics(tasks, layout_config=None):
+    metrics_rows = []
+    metrics_by_index = {}
+
+    for task in tasks:
+        index = task["index"]
+        char = task["char"]
+        row = {
+            "index": index,
+            "char": char,
+            "unicode": f"U+{ord(char):04X}",
+            "group": get_group_for_char(char, layout_config) if layout_config else classify_glyph(char),
+            "page": task.get("page", ""),
+            "row": task.get("row", ""),
+            "col": task.get("col", ""),
+            "ok": False,
+            "error": "",
+        }
+        try:
+            image, source = decode_cell_image(task)
+            row.update(measure_glyph_bitmap(
+                image,
+                char,
+                source,
+            ))
+            row["group"] = get_group_for_char(char, layout_config) if layout_config else row["group"]
+            row["ok"] = True
+            metrics_by_index[index] = {
+                key: row[key]
+                for key in [
+                    "group",
+                    "bbox_x0",
+                    "bbox_y0",
+                    "bbox_x1",
+                    "bbox_y1",
+                    "bbox_width",
+                    "bbox_height",
+                    "bbox_max",
+                    "center_x",
+                    "center_y",
+                    "source_width",
+                    "source_height",
+                ]
+            }
+        except Exception as exc:
+            row["error"] = f"{type(exc).__name__}: {exc}"
+        metrics_rows.append(row)
+
+    return metrics_rows, metrics_by_index
+
+
+def attach_adaptive_layouts(metrics_rows, metrics_by_index, layout_config):
+    group_stats = compute_group_statistics(metrics_rows)
+    rows_by_index = {row["index"]: row for row in metrics_rows}
+
+    for index, metrics in metrics_by_index.items():
+        char = rows_by_index.get(index, {}).get("char")
+        if not char:
+            continue
+        group = get_group_for_char(char, layout_config)
+        metrics["group"] = group
+        rule = resolve_layout_rule(char, group, layout_config)
+        adaptive = apply_adaptive_layout(metrics, group_stats, rule)
+        metrics.update(adaptive)
+
+        row = rows_by_index.get(index)
+        if row is not None:
+            row["group"] = group
+            row.update(adaptive)
+
+    return group_stats
 
 
 def update_metrics_report_rows(metrics_rows, task_results):
@@ -607,9 +734,24 @@ def run_trace(
     glyph_padding=DEFAULT_GLYPH_PADDING,
     save_normalized=False,
     svg_dir=SVG_DIR,
+    metrics_mode="full",
+    layout_mode="fixed",
+    glyph_layout_config_path=DEFAULT_GLYPH_LAYOUT_CONFIG_PATH,
+    report_glyph_layout=False,
 ):
     start = time.perf_counter()
     REPORT_PATH.parent.mkdir(parents=True, exist_ok=True)
+    if metrics_mode not in {"full", "none"}:
+        raise ValueError(f"unsupported metrics_mode: {metrics_mode}")
+    if layout_mode not in {"fixed", "adaptive"}:
+        raise ValueError(f"unsupported layout_mode: {layout_mode}")
+    if metrics_mode == "none" and GLYPH_METRICS_REPORT_PATH.exists():
+        GLYPH_METRICS_REPORT_PATH.unlink()
+    layout_config = (
+        load_glyph_layout_config(glyph_layout_config_path)
+        if layout_mode == "adaptive"
+        else None
+    )
 
     chars = load_charset(charset_path)
     direct_trace_mode = cell_records is not None
@@ -638,7 +780,8 @@ def run_trace(
     if input_count == 0:
         report = "No cell input found. Skipped SVG tracing.\n"
         REPORT_PATH.write_text(report, encoding="utf-8")
-        write_glyph_metrics_report([])
+        if metrics_mode == "full":
+            write_glyph_metrics_report([])
         print(report, end="")
         return True
 
@@ -684,7 +827,14 @@ def run_trace(
             task["cell_path"] = str(cell_paths[order_index])
         tasks.append(task)
 
-    metrics_rows, metrics_by_index = measure_trace_metrics(tasks)
+    metrics_rows = []
+    group_stats = {}
+    if metrics_mode == "full":
+        metrics_rows, metrics_by_index = measure_trace_metrics(tasks, layout_config)
+    else:
+        metrics_rows, metrics_by_index = measure_required_bbox_metrics(tasks, layout_config)
+    if layout_mode == "adaptive":
+        group_stats = attach_adaptive_layouts(metrics_rows, metrics_by_index, layout_config)
     for task in tasks:
         metrics = metrics_by_index.get(task["index"])
         if metrics is not None:
@@ -708,16 +858,17 @@ def run_trace(
     if input_count < len(chars):
         for index in range(input_count, len(chars)):
             char = chars[index]
-            metrics_rows.append(
-                {
-                    "index": index,
-                    "char": char,
-                    "unicode": f"U+{ord(char):04X}",
-                    "group": classify_glyph(char),
-                    "ok": False,
-                    "error": "missing cell input",
-                }
-            )
+            if metrics_mode == "full":
+                metrics_rows.append(
+                    {
+                        "index": index,
+                        "char": char,
+                        "unicode": f"U+{ord(char):04X}",
+                        "group": classify_glyph(char),
+                        "ok": False,
+                        "error": "missing cell input",
+                    }
+                )
             failures.append(
                 f"index={index} file=<missing> char={char} "
                 f"unicode=U+{ord(char):04X} error=missing cell input"
@@ -726,8 +877,13 @@ def run_trace(
     if input_count > len(chars):
         failures.append(f"extra cell inputs ignored: {input_count - len(chars)}")
 
-    update_metrics_report_rows(metrics_rows, task_results)
-    write_glyph_metrics_report(metrics_rows)
+    if metrics_mode == "full":
+        update_metrics_report_rows(metrics_rows, task_results)
+        write_glyph_metrics_report(metrics_rows)
+
+    layout_report_result = None
+    if report_glyph_layout:
+        layout_report_result = write_glyph_layout_report(metrics_rows, group_stats)
     adjusted_count = sum(
         1 for result in task_results if result.get("ok") and result.get("correction_applied")
     )
@@ -762,12 +918,28 @@ def run_trace(
         f"glyph size: {glyph_size}",
         f"glyph padding: {glyph_padding}",
         f"save_normalized: {save_normalized}",
+        f"trace metrics: {metrics_mode}",
+        f"layout mode: {layout_mode}",
+        f"glyph layout config: {glyph_layout_config_path if layout_mode == 'adaptive' else 'not used'}",
         f"normalized PNG count: {normalized_count}",
         f"SVG files in {svg_dir}: {len(list_svg_files(svg_dir))}",
         f"elapsed time: {elapsed:.2f}s",
-        "",
-        "failed glyph list:",
     ]
+    if layout_report_result:
+        lines.extend(
+            [
+                f"glyph layout report: {layout_report_result['report_path']}",
+                f"glyph layout summary: {layout_report_result['summary_path']}",
+                f"layout outlier glyph count: {layout_report_result['outlier_count']}",
+                f"layout correction applied count: {layout_report_result['correction_count']}",
+            ]
+        )
+    lines.extend(
+        [
+            "",
+            "failed glyph list:",
+        ]
+    )
     lines.extend(sorted(failures) if failures else ["None"])
 
     report = "\n".join(lines) + "\n"
@@ -788,6 +960,10 @@ if __name__ == "__main__":
             glyph_padding=args.glyph_padding,
             save_normalized=args.save_normalized,
             svg_dir=SVG_DIR,
+            metrics_mode=args.metrics_mode,
+            layout_mode=args.layout_mode,
+            glyph_layout_config_path=args.glyph_layout_config,
+            report_glyph_layout=args.report_glyph_layout,
         )
         else 1
     )

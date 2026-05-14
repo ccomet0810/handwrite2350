@@ -149,7 +149,7 @@ def detect_markers(image):
     return order_markers([candidate["center"] for candidate in selected]), candidates
 
 
-def warp_page(image, ordered_markers):
+def warp_page(image, ordered_markers, interpolation=cv2.INTER_CUBIC):
     destination = np.array(
         [
             [0, 0],
@@ -161,7 +161,7 @@ def warp_page(image, ordered_markers):
     )
 
     matrix = cv2.getPerspectiveTransform(ordered_markers, destination)
-    return cv2.warpPerspective(image, matrix, WARPED_SIZE, flags=cv2.INTER_CUBIC)
+    return cv2.warpPerspective(image, matrix, WARPED_SIZE, flags=interpolation)
 
 
 def draw_debug_image(image, ordered_markers, candidates):
@@ -190,25 +190,42 @@ def draw_debug_image(image, ordered_markers, candidates):
     return debug
 
 
-def preprocess_image(image_path, save_debug=False):
+def resolve_interpolation(interpolation):
+    if interpolation in ("cubic", cv2.INTER_CUBIC):
+        return cv2.INTER_CUBIC, "cubic"
+    if interpolation in ("linear", cv2.INTER_LINEAR):
+        return cv2.INTER_LINEAR, "linear"
+    raise ValueError(f"unsupported warp interpolation: {interpolation}")
+
+
+def preprocess_image(
+    image_path,
+    save_debug=False,
+    save_warped=True,
+    interpolation=cv2.INTER_CUBIC,
+):
     image = cv2.imread(str(image_path))
     if image is None:
         raise ValueError(f"failed to read image: {image_path}")
 
+    interpolation_flag, interpolation_name = resolve_interpolation(interpolation)
     ordered_markers, candidates = detect_markers(image)
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-    warped_gray = warp_page(gray, ordered_markers)
-
-    WARPED_DIR.mkdir(parents=True, exist_ok=True)
+    warped_gray = warp_page(gray, ordered_markers, interpolation=interpolation_flag)
 
     warped_path = WARPED_DIR / f"{image_path.stem}.png"
 
-    if not cv2.imwrite(
-        str(warped_path),
-        warped_gray,
-        [cv2.IMWRITE_PNG_COMPRESSION, PNG_COMPRESSION],
-    ):
-        raise ValueError(f"failed to write warped image: {warped_path}")
+    warped_text = f"warped={warped_path}"
+    if save_warped:
+        WARPED_DIR.mkdir(parents=True, exist_ok=True)
+        if not cv2.imwrite(
+            str(warped_path),
+            warped_gray,
+            [cv2.IMWRITE_PNG_COMPRESSION, PNG_COMPRESSION],
+        ):
+            raise ValueError(f"failed to write warped image: {warped_path}")
+    else:
+        warped_text = f"warped=skipped expected_path={warped_path}"
 
     debug_text = "debug=skipped"
     if save_debug:
@@ -223,7 +240,10 @@ def preprocess_image(image_path, save_debug=False):
         f"({int(round(point[0]))},{int(round(point[1]))})" for point in ordered_markers
     )
     return (
-        f"OK {image_path.name}: markers={marker_text} warped={warped_path} {debug_text}",
+        (
+            f"OK {image_path.name}: markers={marker_text} {warped_text} "
+            f"interpolation={interpolation_name} {debug_text}"
+        ),
         {
             "name": image_path.stem,
             "path": warped_path,
@@ -232,19 +252,36 @@ def preprocess_image(image_path, save_debug=False):
     )
 
 
-def preprocess_image_task(index_and_path, save_debug=False):
+def preprocess_image_task(
+    index_and_path,
+    save_debug=False,
+    save_warped=True,
+    interpolation=cv2.INTER_CUBIC,
+):
     index, image_path = index_and_path
     try:
-        line, warped_record = preprocess_image(image_path, save_debug=save_debug)
+        line, warped_record = preprocess_image(
+            image_path,
+            save_debug=save_debug,
+            save_warped=save_warped,
+            interpolation=interpolation,
+        )
         return index, True, line, warped_record
     except Exception as exc:
         line = f"FAIL {image_path.name}: {type(exc).__name__}: {exc}"
         return index, False, line, None
 
 
-def run_preprocess(input_dir=INPUT_DIR, save_debug=False, workers=None):
+def run_preprocess(
+    input_dir=INPUT_DIR,
+    save_debug=False,
+    workers=None,
+    save_warped=True,
+    interpolation=cv2.INTER_CUBIC,
+):
     image_paths = list_input_images(input_dir)
     REPORT_PATH.parent.mkdir(parents=True, exist_ok=True)
+    interpolation_flag, interpolation_name = resolve_interpolation(interpolation)
 
     if not image_paths:
         report = "No input images found. Skipped preprocessing.\n"
@@ -258,6 +295,8 @@ def run_preprocess(input_dir=INPUT_DIR, save_debug=False, workers=None):
         "handwrite2350 page preprocess report",
         "=" * 40,
         f"worker count: {worker_count}",
+        f"save warped PNG: {save_warped}",
+        f"warp interpolation: {interpolation_name}",
     ]
     success = True
     warped_records = []
@@ -268,12 +307,20 @@ def run_preprocess(input_dir=INPUT_DIR, save_debug=False, workers=None):
             index, ok, line, warped_record = preprocess_image_task(
                 item,
                 save_debug=save_debug,
+                save_warped=save_warped,
+                interpolation=interpolation_flag,
             )
             results[index] = (ok, line, warped_record)
     else:
         with ThreadPoolExecutor(max_workers=worker_count) as executor:
             futures = [
-                executor.submit(preprocess_image_task, item, save_debug)
+                executor.submit(
+                    preprocess_image_task,
+                    item,
+                    save_debug,
+                    save_warped,
+                    interpolation_flag,
+                )
                 for item in enumerate(image_paths)
             ]
             for future in as_completed(futures):
