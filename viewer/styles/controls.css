@@ -1,0 +1,123 @@
+.panel {
+  margin: 0;
+  padding: 14px;
+  border-bottom: 1px solid var(--border);
+}
+
+.panel-title {
+  margin: 0 0 10px;
+  color: var(--muted);
+  font-family: var(--sans);
+  font-size: 11px;
+  font-weight: 900;
+  letter-spacing: 0;
+  line-height: 1;
+  text-transform: uppercase;
+}
+
+.mode-list {
+  display: grid;
+  gap: 6px;
+}
+
+.mode-button {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  min-height: 34px;
+  padding: 7px 9px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text);
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 800;
+  text-align: left;
+}
+
+.mode-button:hover {
+  border-color: var(--border-soft);
+  background: #f1eee7;
+}
+
+.mode-button.active {
+  border-color: var(--border);
+  background: var(--surface-strong);
+  color: var(--accent-ink);
+}
+
+.control-stack {
+  display: grid;
+  gap: 14px;
+}
+
+.field {
+  display: grid;
+  gap: 6px;
+  color: var(--text);
+  font-size: 11px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.range-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 42px;
+  gap: 10px;
+  align-items: center;
+}
+
+.range-row output {
+  color: var(--muted);
+  font-size: 11px;
+  text-align: right;
+}
+
+input[type="range"] {
+  width: 100%;
+  accent-color: var(--accent);
+}
+
+input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  accent-color: var(--accent);
+}
+
+.check-list {
+  display: grid;
+  gap: 10px;
+}
+
+.check-list label {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+textarea {
+  display: block;
+  width: 100%;
+  min-height: 176px;
+  resize: vertical;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--text);
+  padding: 10px;
+  line-height: 1.5;
+}
+
+.cell-info {
+  min-height: 132px;
+  margin: 0;
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 11px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+}

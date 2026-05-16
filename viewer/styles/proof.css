@@ -1,0 +1,244 @@
+.proof-area {
+  min-width: max-content;
+  min-height: 100%;
+  padding: 0;
+}
+
+.proof-area.empty {
+  display: grid;
+  min-width: 0;
+  place-items: center;
+  color: var(--muted);
+  font-family: var(--sans);
+  font-size: 14px;
+}
+
+.proof-section {
+  width: max-content;
+  min-width: 100%;
+  margin: 0;
+  border: 0;
+  border-bottom: 2px solid var(--border);
+  background: var(--surface);
+}
+
+.proof-section:last-child {
+  border-bottom: 0;
+}
+
+.section-title {
+  margin: 0;
+  padding: 9px 11px;
+  border-bottom: 2px solid var(--border);
+  background: var(--surface-strong);
+  color: var(--accent-ink);
+  font-family: var(--sans);
+  font-size: 12px;
+  font-weight: 900;
+  line-height: 1;
+  text-transform: uppercase;
+}
+
+.section-body {
+  overflow: visible;
+}
+
+.flow-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, var(--cellW));
+  width: min(100vw, 1320px);
+  max-width: calc(100vw - var(--sideW) - 40px);
+}
+
+.matrix-head,
+.matrix-row {
+  display: grid;
+  grid-template-columns: 56px repeat(var(--cols), var(--cellW));
+  width: max-content;
+}
+
+.matrix-head {
+  position: sticky;
+  top: 0;
+  z-index: 20;
+}
+
+.header-cell,
+.row-label {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--surface-strong);
+  color: var(--accent-ink);
+  font-size: 12px;
+  font-weight: 900;
+}
+
+.header-cell {
+  width: var(--cellW);
+  height: 34px;
+  border-right: 1px solid var(--border-soft);
+  border-bottom: 1px solid var(--border-soft);
+}
+
+.corner-cell,
+.row-label {
+  position: sticky;
+  left: 0;
+  z-index: 10;
+  width: 56px;
+  border-right: 1px solid var(--border-soft);
+}
+
+.corner-cell {
+  top: 0;
+  z-index: 22;
+}
+
+.row-label {
+  min-height: var(--cellH);
+  border-bottom: 1px solid var(--border-soft);
+}
+
+.onset-head .header-cell {
+  height: 42px;
+}
+
+.onset-corner {
+  top: 0;
+  left: 0;
+  z-index: 24;
+  font-size: 22px;
+}
+
+.cell {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: var(--cellW);
+  height: var(--cellH);
+  overflow: hidden;
+  border: 0;
+  border-right: 1px solid var(--border-soft);
+  border-bottom: 1px solid var(--border-soft);
+  background: var(--surface);
+  cursor: pointer;
+  user-select: none;
+}
+
+.cell:hover {
+  z-index: 3;
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+.glyph {
+  position: relative;
+  z-index: 2;
+  color: var(--text);
+  font-family: var(--fontFamily);
+  font-size: var(--glyphSize);
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.missing .glyph {
+  visibility: hidden;
+}
+
+.hline,
+.baseline,
+.boxline {
+  display: none;
+  pointer-events: none;
+}
+
+.show-center .cell::before,
+.show-center .sentence-guides::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 50%;
+  z-index: 1;
+  border-left: 1px solid var(--guide);
+}
+
+.show-center .hline {
+  position: absolute;
+  right: 0;
+  left: 0;
+  top: 50%;
+  z-index: 1;
+  display: block;
+  border-top: 1px solid var(--guide);
+}
+
+.show-baseline .baseline {
+  position: absolute;
+  right: 0;
+  left: 0;
+  top: 72%;
+  z-index: 1;
+  display: block;
+  border-top: 2px solid var(--guide);
+}
+
+.show-box .boxline {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  z-index: 1;
+  display: block;
+  width: var(--inkW, var(--glyphSize));
+  height: var(--inkH, var(--glyphSize));
+  border: 1px dashed var(--guide);
+  transform: translate(-50%, -50%);
+}
+
+.onset-block {
+  width: max-content;
+  border-bottom: 2px solid var(--border);
+}
+
+.onset-block:last-child {
+  border-bottom: 0;
+}
+
+.preview-wrap {
+  position: relative;
+  min-width: min(860px, calc(100vw - var(--sideW) - 40px));
+  min-height: 360px;
+  padding: 18px;
+  background: var(--surface);
+}
+
+.preview-text {
+  position: relative;
+  z-index: 2;
+  font-family: var(--fontFamily);
+  font-size: var(--glyphSize);
+  line-height: 1.45;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.sentence-guides {
+  position: absolute;
+  inset: 18px;
+  z-index: 1;
+  pointer-events: none;
+}
+
+@media (max-width: 900px) {
+  .proof-area {
+    padding: 0;
+  }
+
+  .flow-grid,
+  .preview-wrap {
+    max-width: none;
+    min-width: max-content;
+  }
+}

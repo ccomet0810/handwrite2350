@@ -1,0 +1,155 @@
+.app {
+  display: grid;
+  grid-template-rows: var(--headerH) minmax(0, 1fr);
+  height: 100dvh;
+  min-width: 320px;
+}
+
+.app-header {
+  position: relative;
+  z-index: 20;
+  display: grid;
+  grid-template-columns: minmax(192px, var(--sideW)) minmax(0, 1fr);
+  align-items: stretch;
+  min-width: 0;
+  border-bottom: 2px solid var(--border);
+  background: var(--surface);
+}
+
+.app-title {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  margin: 0;
+  padding: 0 16px;
+  border-right: 2px solid var(--border);
+  overflow: hidden;
+  font-family: var(--sans);
+  font-size: 17px;
+  font-weight: 800;
+  line-height: 1;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.file-status {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 148px;
+  min-width: 0;
+}
+
+.file-name {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  min-width: 0;
+  padding: 0 14px;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.file-button {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 0;
+  border-left: 2px solid var(--border);
+  background: var(--surface-strong);
+  color: var(--accent-ink);
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 900;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.file-button:hover {
+  background: var(--accent);
+}
+
+.status {
+  position: absolute;
+  right: 0;
+  bottom: -2px;
+  left: 0;
+  height: 2px;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.status.active {
+  opacity: 1;
+}
+
+.progress,
+.progress > div {
+  height: 100%;
+}
+
+.progress > div {
+  width: 0%;
+  background: var(--accent);
+  transition: width .16s ease;
+}
+
+.workspace {
+  display: grid;
+  grid-template-columns: var(--sideW) minmax(0, 1fr);
+  min-height: 0;
+}
+
+.sidebar {
+  min-height: 0;
+  overflow-y: auto;
+  border-right: 2px solid var(--border);
+  background: var(--surface);
+}
+
+.proof-scroll {
+  min-width: 0;
+  min-height: 0;
+  overflow: auto;
+  background: var(--bg);
+}
+
+@media (max-width: 900px) {
+  :root {
+    --headerH: 54px;
+    --sideW: 100vw;
+  }
+
+  .app-header {
+    grid-template-columns: minmax(0, 1fr) 132px;
+  }
+
+  .app-title {
+    border-right: 0;
+  }
+
+  .file-status {
+    display: block;
+  }
+
+  .file-name {
+    display: none;
+  }
+
+  .file-button {
+    height: 100%;
+    border-left: 2px solid var(--border);
+  }
+
+  .workspace {
+    grid-template-columns: 1fr;
+    grid-template-rows: minmax(190px, 38dvh) minmax(0, 1fr);
+  }
+
+  .sidebar {
+    border-right: 0;
+    border-bottom: 2px solid var(--border);
+  }
+}

@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>TTF Proof Viewer</title>
+  <link rel="stylesheet" href="./styles/viewer.css" />
+</head>
+<body class="show-center show-baseline">
+  <div class="app">
+    <header class="app-header">
+      <h1 class="app-title">TTF Proof Viewer</h1>
+
+      <div class="file-status">
+        <span id="fileName" class="file-name" aria-live="polite">No font selected</span>
+        <label class="file-button" for="fontFile">Select Font</label>
+        <input id="fontFile" class="visually-hidden" type="file" accept=".ttf,.otf,font/ttf,font/otf" />
+      </div>
+
+      <div id="status" class="status" aria-live="polite">
+        <span id="statusText" class="visually-hidden"></span>
+        <div class="progress" aria-hidden="true"><div id="progressBar"></div></div>
+      </div>
+    </header>
+
+    <div class="workspace">
+      <aside class="sidebar" aria-label="Viewer controls">
+        <section class="panel">
+          <h2 class="panel-title">View</h2>
+          <div class="mode-list" id="modes"></div>
+        </section>
+
+        <section class="panel">
+          <h2 class="panel-title">Size</h2>
+          <div class="control-stack">
+            <label class="field">
+              <span>Cell width</span>
+              <span class="range-row">
+                <input id="cellW" type="range" min="56" max="180" value="96" />
+                <output id="cellWOut">96</output>
+              </span>
+            </label>
+
+            <label class="field">
+              <span>Cell height</span>
+              <span class="range-row">
+                <input id="cellH" type="range" min="64" max="190" value="108" />
+                <output id="cellHOut">108</output>
+              </span>
+            </label>
+
+            <label class="field">
+              <span>Glyph size</span>
+              <span class="range-row">
+                <input id="glyphSize" type="range" min="28" max="128" value="54" />
+                <output id="glyphSizeOut">54</output>
+              </span>
+            </label>
+          </div>
+        </section>
+
+        <section class="panel">
+          <h2 class="panel-title">Guides</h2>
+          <div class="check-list">
+            <label><input id="centerGuide" type="checkbox" checked /> Center</label>
+            <label><input id="baselineGuide" type="checkbox" checked /> Baseline</label>
+            <label><input id="boxGuide" type="checkbox" /> Ink box</label>
+          </div>
+        </section>
+
+        <section class="panel is-hidden" id="sentencePanel">
+          <h2 class="panel-title">Text</h2>
+          <textarea id="sentenceInput" spellcheck="false">가나다라마바사아자차카타파하
+고과괘괴교 구궈궤귀규 그긔기
+오 우 으 요 유 의 이
+고 보 오 우 으 브 죠
+ABCDEFGHIJKLMNOPQRSTUVWXYZ
+abcdefghijklmnopqrstuvwxyz
+0123456789
+.,:;!?&quot;'`-_=+/@#$%&amp;()[]{}&lt;&gt;</textarea>
+        </section>
+
+        <section class="panel" id="cellInfoPanel">
+          <h2 class="panel-title">Cell</h2>
+          <pre class="cell-info" id="cellInfo">-</pre>
+        </section>
+      </aside>
+
+      <main class="proof-scroll" aria-label="Font proof">
+        <div id="proof" class="proof-area empty"></div>
+      </main>
+    </div>
+  </div>
+
+  <script type="module" src="./scripts/main.js"></script>
+</body>
+</html>
