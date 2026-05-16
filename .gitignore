@@ -15,3 +15,6 @@ ENV/
 # Generated outputs
 outputs/*
 !outputs/.gitkeep
+manual_templates/
+manual_masks_auto/
+rule_jamo_mask_lab/work/

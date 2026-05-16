@@ -43,6 +43,9 @@ FontForge 메모: 기본 TTF 생성은 `--font-quality fast`입니다. Fast mode
 - TTF 생성 리포트: `outputs/font_build_report.txt`
 - 성능 리포트: `outputs/performance_report.txt`
 
+자모 슬롯 mask 초안 생성 실험은 메인 Docker 폰트 엔진과 분리되어 있으며, `rule_jamo_mask_lab/README.md`를 참고합니다.
+
+
 검수용 debug marker, contact sheet, cell PNG, normalized glyph PNG는 기본 실행에서 저장하지 않습니다. 기본 서비스 흐름은 원근 보정된 grayscale page를 메모리로 넘기고, 동시에 검수용 warped PNG는 낮은 압축률로 저장합니다. 이후 cell split은 warped PNG를 다시 읽지 않고 메모리의 grayscale page에서 cell crop을 만들어 tracing으로 넘기는 direct trace mode입니다. `--save-debug-artifacts` 또는 `--save-normalized` 옵션을 사용할 때만 검수용 파일을 생성/갱신합니다.
 
 ## Font Metadata
